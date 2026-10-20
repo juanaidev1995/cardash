@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CarDash Sender</title>
+<style>
+  body { font-family: sans-serif; background:#0B1220; color:#fff;
+         margin:0; padding:20px; text-align:center; }
+  h2 { margin-top:10px; }
+  button { font-size:18px; padding:14px 22px; border:0; border-radius:10px;
+           background:#2E86C1; color:#fff; margin:8px; width:85%; max-width:320px; }
+  button:disabled { background:#555; }
+  #log { margin-top:18px; font-size:14px; color:#9AA7BD; white-space:pre-line;
+         text-align:left; background:#1A2536; padding:12px; border-radius:8px; min-height:80px; }
+  #info { font-size:22px; margin-top:12px; }
+</style>
+</head>
+<body>
+<h2>CarDash Sender</h2>
+<button id="btnConnect">1. เชื่อมต่อ CarDash</button>
+<button id="btnStart" disabled>2. เริ่มส่งข้อมูลอากาศ</button>
+<button id="btnStop" disabled>หยุด</button>
+<div id="info"></div>
+<div id="log">พร้อมทำงาน</div>
+
+<script>
+const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHAR_UUID_RX = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const INTERVAL_MS  = 5 * 60 * 1000;
+
+let device, rxChar, timer = null;
+
+const logEl  = document.getElementById("log");
+const infoEl = document.getElementById("info");
+const btnConnect = document.getElementById("btnConnect");
+const btnStart   = document.getElementById("btnStart");
+const btnStop    = document.getElementById("btnStop");
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString("th-TH");
+  logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+}
+
+async function connectBLE() {
+  if (!navigator.bluetooth) {
+    log("เบราว์เซอร์นี้ไม่รองรับ Web Bluetooth ให้ใช้ Chrome บน Android");
+    return;
+  }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: "CarDash" }],
+      optionalServices: [SERVICE_UUID]
+    });
+    device.addEventListener("gattserverdisconnected", () => {
+      log("การเชื่อมต่อหลุด");
+      btnStart.disabled = true;
+      rxChar = null;
+    });
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE_UUID);
+    rxChar = await service.getCharacteristic(CHAR_UUID_RX);
+    log("เชื่อมต่อ CarDash สำเร็จ");
+    btnStart.disabled = false;
+  } catch (e) {
+    log("เชื่อมต่อไม่สำเร็จ: " + e.message);
+  }
+}
+
+async function sendJSON(obj) {
+  if (!rxChar) throw new Error("ยังไม่ได้เชื่อมต่อ");
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  for (let i = 0; i < bytes.length; i += 20) {
+    await rxChar.writeValueWithoutResponse(bytes.slice(i, i + 20));
+    await new Promise(r => setTimeout(r, 30));
+  }
+  log("ส่งแล้ว: " + JSON.stringify(obj));
+}
+
+function getPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("ไม่รองรับ GPS"));
+    navigator.geolocation.getCurrentPosition(
+      p => resolve(p.coords),
+      e => reject(new Error("ดึงตำแหน่งไม่ได้: " + e.message)),
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 }
+    );
+  });
+}
+
+function weatherText(code) {
+  if (code === 0) return "Clear";
+  if (code <= 3) return "Partly cloudy";
+  if (code <= 48) return "Fog";
+  if (code <= 67) return "Rain";
+  if (code <= 77) return "Snow";
+  if (code <= 82) return "Showers";
+  if (code <= 99) return "Thunderstorm";
+  return "--";
+}
+
+async function fetchWeather(lat, lon) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+              `&current=temperature_2m,weather_code&timezone=auto`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Open-Meteo ตอบกลับผิดพลาด");
+  const data = await res.json();
+  return { temp: data.current.temperature_2m, code: data.current.weather_code };
+}
+
+async function fetchCity(lat, lon) {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&zoom=10&lat=${lat}&lon=${lon}&accept-language=en`,
+      { headers: { "Accept": "application/json" } });
+    const d = await res.json();
+    const a = d.address || {};
+    return a.city || a.town || a.district || a.county || "Unknown";
+  } catch {
+    return "Unknown";
+  }
+}
+
+async function updateAndSend() {
+  try {
+    log("กำลังดึงตำแหน่งและอากาศ...");
+    const c = await getPosition();
+    const [w, city] = await Promise.all([
+      fetchWeather(c.latitude, c.longitude),
+      fetchCity(c.latitude, c.longitude)
+    ]);
+    const payload = {
+      city: city,
+      desc: weatherText(w.code),
+      out_t: Math.round(w.temp * 10) / 10,
+      in_t: 0,
+      in_h: 0
+    };
+    infoEl.textContent = `${payload.city}  ${payload.out_t}°C`;
+    await sendJSON(payload);
+  } catch (e) {
+    log("ผิดพลาด: " + e.message);
+  }
+}
+
+btnConnect.onclick = connectBLE;
+
+btnStart.onclick = async () => {
+  btnStart.disabled = true;
+  btnStop.disabled = false;
+  await updateAndSend();
+  timer = setInterval(updateAndSend, INTERVAL_MS);
+};
+
+btnStop.onclick = () => {
+  clearInterval(timer);
+  timer = null;
+  btnStop.disabled = true;
+  btnStart.disabled = false;
+  log("หยุดส่งข้อมูลแล้ว");
+};
+</script>
+</body>
+</html>
