@@ -69,7 +69,7 @@ async function connectBLE() {
 
 async function sendJSON(obj) {
   if (!rxChar) throw new Error("ยังไม่ได้เชื่อมต่อ");
-  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  const bytes = new TextEncoder().encode(JSON.stringify(obj) + "\n");
   for (let i = 0; i < bytes.length; i += 20) {
     await rxChar.writeValueWithoutResponse(bytes.slice(i, i + 20));
     await new Promise(r => setTimeout(r, 30));
